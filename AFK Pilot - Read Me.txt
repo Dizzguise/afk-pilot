@@ -1,0 +1,57 @@
+AFK PILOT 2.1.0
+===============
+
+Window Automation Utility
+
+WHAT IT DOES
+- Auto-walk: holds W.
+- Sprint: starts holding W, waits 0.20 seconds, holds Left Ctrl for 0.15
+  seconds, then releases Ctrl while W remains held.
+- Auto-jump: optionally holds Space while walking.
+- Auto-eat: optionally holds right-click while automation is active.
+- Auto-clicker: 0.1-100 CPS, Left/Right button, Click/Hold modes.
+- Background target mode: sends keyboard and mouse messages only to the chosen
+  window, at the center of that window, so your active desktop window is not
+  clicked.
+- When Pause is unchecked, the app detects both target focus loss and focus
+  return even while Background target mode keeps the same selected window.
+- After the target finishes its focus-loss reset, the app reasserts W once and
+  follows it with one delayed Ctrl sprint pulse. When the target regains focus, it
+  immediately reasserts W and the Ctrl pulse once. Neither action repeats in a loop.
+- Selecting another target or pressing Refresh while running safely reapplies the
+  active automation to the selected target instead of leaving it stopped.
+- Foreground mode: uses normal Windows simulated input for game versions that
+  reject background window messages.
+- Custom global toggle hotkey (F6 by default).
+- Dedicated emergency-stop hotkey (F7 by default).
+- Optional start delay and active-time timer.
+- Remembers settings and always releases all held input on stop or exit.
+
+QUICK START
+1. Run AFKPilot.exe.
+2. Enable Auto-walk, Auto-click, Auto-eat, or any useful combination.
+3. For background operation, enable Background target mode, select the application,
+   and press Refresh if the game is not listed.
+4. Set CPS, button, and Click/Hold mode if using the clicker.
+5. Press the displayed toggle key to start or stop.
+6. Press the displayed emergency-stop key for an immediate release of all input.
+
+AUTO-EAT AND CLICKER COMBINATIONS
+- Auto-eat can run by itself or alongside auto-walk.
+- Auto-eat can run alongside LEFT auto-clicking.
+- Auto-eat cannot run alongside RIGHT auto-clicking because both features would
+  control the same mouse button. The app blocks that conflicting setup.
+
+TARGET-WINDOW NOTE
+Background target mode uses Windows messages and never moves or clicks your real
+cursor. Some applications ignore input while their window is not focused. If that
+happens, turn Background target mode off and use Foreground mode; that limitation
+comes from the target application's input system.
+
+If a default hotkey is already owned by another program, the app selects a safe
+alternative and displays the exact replacement in the Controls panel.
+
+NOTES
+- Windows 10/11 only.
+- If the target runs as administrator, this app may also need administrator rights.
+- Multiplayer servers may restrict automation. Follow the server's rules.
