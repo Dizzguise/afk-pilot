@@ -1,4 +1,4 @@
-AFK PILOT 2.1.0
+AFK PILOT 2.1.1
 ===============
 
 Window Automation Utility
@@ -25,7 +25,7 @@ WHAT IT DOES
 - Custom global toggle hotkey (F6 by default).
 - Dedicated emergency-stop hotkey (F7 by default).
 - Optional start delay and active-time timer.
-- Remembers settings and always releases all held input on stop or exit.
+- Remembers settings and releases held input on stop or exit.
 
 QUICK START
 1. Run AFKPilot.exe.
@@ -47,6 +47,11 @@ Background target mode uses Windows messages and never moves or clicks your real
 cursor. Some applications ignore input while their window is not focused. If that
 happens, turn Background target mode off and use Foreground mode; that limitation
 comes from the target application's input system.
+
+To change the toggle key, click its button, press and release the new key, then
+use exactly the displayed shortcut. Ctrl/Alt/Shift are optional. Num Lock and
+Caps Lock do not add modifiers. Esc or Cancel keeps the previous key. Reassign
+a shortcut once after updating if an older version captured it incorrectly.
 
 If a default hotkey is already owned by another program, the app selects a safe
 alternative and displays the exact replacement in the Controls panel.

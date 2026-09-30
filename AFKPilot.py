@@ -6,11 +6,14 @@ import atexit
 import ctypes
 from ctypes import wintypes
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import queue
 import sys
 import threading
+import tempfile
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -18,7 +21,8 @@ from typing import Any
 
 
 APP_NAME = "AFK Pilot"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
+LOGGER = logging.getLogger("afkpilot")
 
 # Give the target time to observe W before sending a distinct sprint-key pulse.
 SPRINT_WARMUP_SECONDS = 0.20
@@ -45,6 +49,28 @@ WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
+
+
+def read_settings(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def write_settings(path: Path, data: dict[str, Any]) -> None:
+    """Replace settings atomically, keeping the previous file on write failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def format_duration(seconds: float) -> str:
@@ -131,9 +157,11 @@ class KeyController:
         self._mouse_held: list[str] = []
         self._target_hwnd: int | None = None
         self._sprint_enabled = False
-        self._sleep = time.sleep
+        self._clock = time.monotonic
+        self._sprint_at: float | None = None
+        self._sprint_release_at: float | None = None
         self._lock = threading.Lock()
-        self._user32 = ctypes.windll.user32 if os.name == "nt" else None
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True) if os.name == "nt" else None
         if self._user32 is not None:
             self._user32.SendInput.argtypes = [
                 wintypes.UINT,
@@ -179,7 +207,7 @@ class KeyController:
         )
         sent = self._user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(_INPUT))
         if sent != 1:
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def _post_key(self, hwnd: int, vk: int, key_up: bool) -> None:
         if not self._user32.IsWindow(hwnd):
@@ -187,7 +215,7 @@ class KeyController:
         scan = self._user32.MapVirtualKeyW(vk, 0)
         message = WM_KEYUP if key_up else WM_KEYDOWN
         if not self._user32.PostMessageW(hwnd, message, vk, keyboard_lparam(scan, key_up)):
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def _send_key(self, vk: int, key_up: bool, target_hwnd: int | None) -> None:
         if target_hwnd is None:
@@ -198,7 +226,7 @@ class KeyController:
     def _mouse_lparam(self, hwnd: int) -> int:
         rect = wintypes.RECT()
         if not self._user32.GetClientRect(hwnd, ctypes.byref(rect)):
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
         x = max(0, (rect.right - rect.left) // 2)
         y = max(0, (rect.bottom - rect.top) // 2)
         return (y << 16) | (x & 0xFFFF)
@@ -215,7 +243,7 @@ class KeyController:
             )
             sent = self._user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(_INPUT))
             if sent != 1:
-                raise ctypes.WinError()
+                raise ctypes.WinError(ctypes.get_last_error())
             return
 
         if not self._user32.IsWindow(target_hwnd):
@@ -229,7 +257,7 @@ class KeyController:
         if not self._user32.PostMessageW(
             target_hwnd, message, wparam, self._mouse_lparam(target_hwnd)
         ):
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def apply_movement(
         self,
@@ -262,12 +290,25 @@ class KeyController:
             self._sprint_enabled = walk and sprint
 
     def _pulse_sprint(self, target_hwnd: int | None) -> None:
-        self._sleep(SPRINT_WARMUP_SECONDS)
-        self._send_key(VK_LCONTROL, False, target_hwnd)
-        try:
-            self._sleep(SPRINT_HOLD_SECONDS)
-        finally:
+        if VK_LCONTROL in self._held:
             self._send_key(VK_LCONTROL, True, target_hwnd)
+            self._held.remove(VK_LCONTROL)
+        self._sprint_release_at = None
+        self._sprint_at = self._clock() + SPRINT_WARMUP_SECONDS
+
+    def advance_sprint(self) -> None:
+        """Advance the pulse without blocking the UI or emergency-stop handling."""
+        with self._lock:
+            now = self._clock()
+            if self._sprint_at is not None and now >= self._sprint_at:
+                self._send_key(VK_LCONTROL, False, self._target_hwnd)
+                self._held.append(VK_LCONTROL)
+                self._sprint_at = None
+                self._sprint_release_at = now + SPRINT_HOLD_SECONDS
+            if self._sprint_release_at is not None and now >= self._sprint_release_at:
+                self._send_key(VK_LCONTROL, True, self._target_hwnd)
+                self._held.remove(VK_LCONTROL)
+                self._sprint_release_at = None
 
     def reassert_background(self, sprint: bool, target_hwnd: int) -> None:
         """Reapply held input once after the target finishes its focus-loss reset."""
@@ -283,10 +324,15 @@ class KeyController:
 
     def click(self, button: str, target_hwnd: int | None) -> None:
         with self._lock:
+            if self._target_hwnd != target_hwnd and (self._held or self._mouse_held):
+                self._release_all_locked()
+            self._target_hwnd = target_hwnd
             if button in self._mouse_held:
                 return
             self._send_mouse(button, True, target_hwnd)
+            self._mouse_held.append(button)
             self._send_mouse(button, False, target_hwnd)
+            self._mouse_held.remove(button)
 
     def hold_mouse(self, button: str, target_hwnd: int | None) -> None:
         with self._lock:
@@ -300,23 +346,23 @@ class KeyController:
     def release_mouse(self, button: str) -> None:
         with self._lock:
             if button in self._mouse_held:
-                try:
-                    self._send_mouse(button, False, self._target_hwnd)
-                finally:
-                    self._mouse_held.remove(button)
+                self._send_mouse(button, False, self._target_hwnd)
+                self._mouse_held.remove(button)
 
     def _release_all_locked(self) -> None:
+        self._sprint_at = None
+        self._sprint_release_at = None
         for button in reversed(self._mouse_held):
             try:
                 self._send_mouse(button, False, self._target_hwnd)
             except Exception:
-                pass
+                LOGGER.exception("Could not release mouse button %s", button)
         self._mouse_held.clear()
         for vk in reversed(self._held):
             try:
                 self._send_key(vk, True, self._target_hwnd)
             except Exception:
-                pass
+                LOGGER.exception("Could not release key %s", vk)
         self._held.clear()
         self._sprint_enabled = False
 
@@ -327,126 +373,133 @@ class KeyController:
 
 
 class HotkeyListener:
-    """Runs Win32 global hotkeys on a small message-loop thread."""
+    """Own registrations on one thread, with deterministic cancellation/cleanup."""
 
     def __init__(self, events: queue.Queue[str]) -> None:
         self.events = events
         self._thread: threading.Thread | None = None
-        self._thread_id: int | None = None
-        self._user32 = ctypes.windll.user32 if os.name == "nt" else None
+        self._stop_event = threading.Event()
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True) if os.name == "nt" else None
         self.last_error = ""
+        if self._user32 is not None:
+            self._user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+            self._user32.RegisterHotKey.restype = wintypes.BOOL
+            self._user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+            self._user32.UnregisterHotKey.restype = wintypes.BOOL
+            self._user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+            self._user32.PeekMessageW.restype = wintypes.BOOL
 
-    def start(
-        self,
-        modifiers: int,
-        vk: int,
-        stop_modifiers: int = 0,
-        stop_vk: int = VK_F7,
-    ) -> bool:
+    def start(self, modifiers: int, vk: int, stop_modifiers: int = 0, stop_vk: int = VK_F7) -> bool:
         self.stop()
         self.last_error = ""
         if self._user32 is None:
+            self.last_error = "Global hotkeys require Windows."
+            return False
+        if self._thread is not None:
+            self.last_error = "The previous hotkey listener has not stopped."
+            return False
+        if (modifiers, vk) == (stop_modifiers, stop_vk):
+            self.last_error = "Toggle and emergency stop must be different."
             return False
 
         ready = threading.Event()
-        result: dict[str, bool] = {"ok": False}
+        stopped = threading.Event()
+        self._stop_event = stopped
+        result = {"ok": False}
 
         def run() -> None:
-            kernel32 = ctypes.windll.kernel32
-            self._thread_id = kernel32.GetCurrentThreadId()
-            toggle_ok = bool(
-                self._user32.RegisterHotKey(None, 1, modifiers | MOD_NOREPEAT, vk)
-            )
-            toggle_error = ctypes.windll.kernel32.GetLastError() if not toggle_ok else 0
-            stop_ok = bool(
-                self._user32.RegisterHotKey(
-                    None, 2, stop_modifiers | MOD_NOREPEAT, stop_vk
-                )
-            )
-            stop_error = ctypes.windll.kernel32.GetLastError() if not stop_ok else 0
-            if not toggle_ok:
-                self.last_error = f"toggle hotkey failed (Windows error {toggle_error})"
-            elif not stop_ok:
-                self.last_error = f"emergency hotkey failed (Windows error {stop_error})"
-            result["ok"] = toggle_ok and stop_ok
-            ready.set()
-
-            if not result["ok"]:
-                if toggle_ok:
-                    self._user32.UnregisterHotKey(None, 1)
-                if stop_ok:
-                    self._user32.UnregisterHotKey(None, 2)
-                self._thread_id = None
-                return
-
-            msg = wintypes.MSG()
-            while self._user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == WM_HOTKEY:
-                    self.events.put("toggle" if msg.wParam == 1 else "stop")
-
-            self._user32.UnregisterHotKey(None, 1)
-            self._user32.UnregisterHotKey(None, 2)
-            self._thread_id = None
+            registered: list[int] = []
+            try:
+                for identifier, mods, key, label in (
+                    (1, modifiers, vk, "Toggle"), (2, stop_modifiers, stop_vk, "Emergency stop")
+                ):
+                    if not self._user32.RegisterHotKey(None, identifier, mods | MOD_NOREPEAT, key):
+                        self.last_error = f"{label} registration failed (Windows error {ctypes.get_last_error()})."
+                        return
+                    registered.append(identifier)
+                result["ok"] = True
+                ready.set()
+                msg = wintypes.MSG()
+                while not stopped.is_set():
+                    while self._user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                        if stopped.is_set():
+                            break
+                        if msg.message == WM_HOTKEY and msg.wParam in (1, 2):
+                            self.events.put("toggle" if msg.wParam == 1 else "stop")
+                    stopped.wait(0.01)
+            except Exception:
+                LOGGER.exception("Global hotkey listener failed")
+                self.last_error = "Global hotkey listener failed; see the diagnostic log."
+                if result["ok"]:
+                    self.events.put("hotkeys_failed")
+                result["ok"] = False
+            finally:
+                for identifier in registered:
+                    self._user32.UnregisterHotKey(None, identifier)
+                ready.set()
 
         self._thread = threading.Thread(target=run, name="global-hotkeys", daemon=True)
         self._thread.start()
-        ready.wait(1.0)
+        if not ready.wait(2.0):
+            self.last_error = "Global hotkey registration timed out."
+            self.stop()
+            return False
+        if not result["ok"]:
+            self.stop()
         return result["ok"]
 
     def stop(self) -> None:
-        if self._thread_id is not None and self._user32 is not None:
-            self._user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                LOGGER.error("Global hotkey thread did not stop")
+                return
         self._thread = None
-        self._thread_id = None
 
 
 SPECIAL_KEYS = {
-    **{f"F{i}": 0x6F + i for i in range(1, 13)},
-    "Insert": 0x2D,
-    "Delete": 0x2E,
-    "Home": 0x24,
-    "End": 0x23,
-    "Prior": 0x21,
-    "Next": 0x22,
-    "Pause": 0x13,
-    "Scroll_Lock": 0x91,
+    **{f"F{i}": 0x6F + i for i in range(1, 25)},
+    "Insert": 0x2D, "Delete": 0x2E, "Home": 0x24, "End": 0x23,
+    "Prior": 0x21, "Next": 0x22, "Pause": 0x13, "Scroll_Lock": 0x91,
 }
+KEY_NAMES = {
+    vk: {"Prior": "PAGE UP", "Next": "PAGE DOWN"}.get(name, name.replace("_", " ").upper())
+    for name, vk in SPECIAL_KEYS.items()
+}
+KEY_NAMES.update({vk: chr(vk) for vk in (*range(0x30, 0x3A), *range(0x41, 0x5B))})
+DEFAULT_HOTKEY = {"modifiers": 0, "vk": 0x75, "display": "F6"}
+
+
+def make_hotkey(modifiers: int, vk: int) -> dict[str, Any]:
+    if vk not in KEY_NAMES or modifiers & ~7:
+        raise ValueError("Choose a letter, digit, navigation key, or function key, optionally with Ctrl, Alt, or Shift.")
+    if vk == VK_W:
+        raise ValueError("W is used for auto-walk. Choose a different key.")
+    if vk == 0x7B:
+        raise ValueError("Windows reserves F12 for the debugger. Choose a different key.")
+    names = [name for mask, name in ((MOD_CONTROL, "CTRL"), (MOD_ALT, "ALT"), (MOD_SHIFT, "SHIFT")) if modifiers & mask]
+    return {"modifiers": modifiers, "vk": vk, "display": " + ".join([*names, KEY_NAMES[vk]])}
 
 
 def hotkey_from_event(event: tk.Event) -> dict[str, Any] | None:
-    keysym = event.keysym
-    if keysym in {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"}:
+    # Tk on Windows uses Mod1 (0x8) for NUM LOCK, not Alt. Alt uses
+    # Mod2 (0x10), and native events can additionally carry AltMask (0x20000).
+    # Keycodes preserve the physical digit when Shift changes its keysym to ! etc.
+    vk = int(getattr(event, "keycode", 0))
+    if vk not in KEY_NAMES:
+        keysym = event.keysym
+        if len(keysym) == 1 and keysym.isascii() and keysym.isalnum():
+            vk = ord(keysym.upper())
+        else:
+            vk = SPECIAL_KEYS.get(keysym, 0)
+    if not vk:
         return None
-
-    if len(keysym) == 1 and keysym.isalpha():
-        vk = ord(keysym.upper())
-        key_name = keysym.upper()
-    elif len(keysym) == 1 and keysym.isdigit():
-        vk = ord(keysym)
-        key_name = keysym
-    elif keysym in SPECIAL_KEYS:
-        vk = SPECIAL_KEYS[keysym]
-        key_name = {"Prior": "PAGE UP", "Next": "PAGE DOWN"}.get(
-            keysym, keysym.replace("_", " ").upper()
-        )
-    else:
-        return None
-
     modifiers = 0
-    names: list[str] = []
-    if event.state & 0x0004:
-        modifiers |= MOD_CONTROL
-        names.append("CTRL")
-    if event.state & 0x0008:
-        modifiers |= MOD_ALT
-        names.append("ALT")
-    if event.state & 0x0001:
-        modifiers |= MOD_SHIFT
-        names.append("SHIFT")
-    names.append(key_name)
-    return {"modifiers": modifiers, "vk": vk, "display": " + ".join(names)}
+    for mask, modifier in ((0x4, MOD_CONTROL), (0x20010, MOD_ALT), (0x1, MOD_SHIFT)):
+        if event.state & mask:
+            modifiers |= modifier
+    return make_hotkey(modifiers, vk)
 
 
 def list_target_windows(exclude_hwnd: int = 0) -> list[tuple[int, str]]:
@@ -454,8 +507,16 @@ def list_target_windows(exclude_hwnd: int = 0) -> list[tuple[int, str]]:
     if os.name != "nt":
         return []
     user32 = ctypes.windll.user32
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
     windows: list[tuple[int, str]] = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
 
     def callback(hwnd: int, _lparam: int) -> bool:
         if int(hwnd) == exclude_hwnd or not user32.IsWindowVisible(hwnd):
@@ -512,8 +573,24 @@ class AFKPilotApp:
         self.window_map: dict[str, int] = {}
         self.window_titles: dict[str, str] = {}
         self.capture_active = False
+        self.capture_dialog: tk.Toplevel | None = None
+        self.capture_candidate: dict[str, Any] | None = None
+        self.hotkeys_ready = False
+        self.closed = False
+        self.test_failure: BaseException | None = None
+        self.fatal_error = False
+        self._save_warning_shown = False
         self.config_path = self._config_path()
         self.config = self._load_config()
+        try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(self.config_path.parent / "afkpilot.log", maxBytes=500_000, backupCount=2, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            LOGGER.addHandler(handler)
+            self.log_handler: logging.Handler | None = handler
+            LOGGER.setLevel(logging.INFO)
+        except OSError:
+            self.log_handler = None
         self.hotkey = self._load_hotkey()
         self.emergency_hotkey = {"modifiers": 0, "vk": VK_F7, "display": "F7"}
 
@@ -524,6 +601,7 @@ class AFKPilotApp:
         self._register_hotkey_or_warn()
 
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.report_callback_exception = self._callback_failed
         atexit.register(self.keys.release_all)
         self.root.after(50, self._tick)
 
@@ -554,22 +632,16 @@ class AFKPilotApp:
         return current_path
 
     def _load_config(self) -> dict[str, Any]:
-        try:
-            return json.loads(self.config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return {}
+        return read_settings(self.config_path)
 
     def _load_hotkey(self) -> dict[str, Any]:
         data = self.config.get("hotkey", {})
         try:
             modifiers = int(data["modifiers"])
             vk = int(data["vk"])
-            display = str(data["display"])
-            if not (0 <= modifiers <= 15 and 1 <= vk <= 255 and display):
-                raise ValueError
-            return {"modifiers": modifiers, "vk": vk, "display": display}
-        except (KeyError, TypeError, ValueError):
-            return {"modifiers": 0, "vk": 0x75, "display": "F6"}
+            return make_hotkey(modifiers, vk)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return dict(DEFAULT_HOTKEY)
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -777,8 +849,8 @@ class AFKPilotApp:
         self.delay_var.set(str(self.config.get("delay", "0")))
         self.click_var.set(bool(self.config.get("click_enabled", False)))
         self.cps_var.set(str(self.config.get("cps", "1.6")))
-        self.click_button_var.set(str(self.config.get("click_button", "Left")).title())
-        self.click_mode_var.set(str(self.config.get("click_mode", "Click")).title())
+        self.click_button_var.set("Right" if self.config.get("click_button") == "Right" else "Left")
+        self.click_mode_var.set("Hold" if self.config.get("click_mode") == "Hold" else "Click")
         self.target_mode_var.set(bool(self.config.get("target_mode", False)))
         self.target_var.set(str(self.config.get("target_title", "")))
         self.timer_var.set(bool(self.config.get("timer_enabled", False)))
@@ -811,10 +883,12 @@ class AFKPilotApp:
             "emergency_hotkey": self.emergency_hotkey,
         }
         try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            write_settings(self.config_path, data)
         except OSError:
-            pass
+            LOGGER.exception("Could not save settings")
+            if not self._save_warning_shown and not self.test_mode:
+                self._save_warning_shown = True
+                messagebox.showwarning(APP_NAME, f"Settings could not be saved to {self.config_path}. Check folder permissions.")
 
     def refresh_windows(self) -> None:
         resume_after_refresh = self.requested
@@ -844,7 +918,7 @@ class AFKPilotApp:
             selected = values[0] if values else "No targetable windows found"
         self.target_combo.configure(values=values)
         self.target_var.set(selected)
-        if resume_after_refresh:
+        if resume_after_refresh and previous_hwnd in self.window_map.values():
             self.start()
 
     def _target_changed(self) -> None:
@@ -865,7 +939,7 @@ class AFKPilotApp:
 
     def _selected_target(self) -> int:
         hwnd = self.window_map.get(self.target_var.get(), 0)
-        if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        if not hwnd or not self.keys._user32.IsWindow(hwnd):
             raise ValueError("Choose an open target window and press Refresh if needed.")
         return hwnd
 
@@ -875,12 +949,12 @@ class AFKPilotApp:
             {"modifiers": 0, "vk": 0x77, "display": "F8"},
             {"modifiers": 0, "vk": 0x78, "display": "F9"},
             {"modifiers": 0, "vk": 0x79, "display": "F10"},
-            {"modifiers": MOD_CONTROL, "vk": 0x75, "display": "CTRL + F6"},
+            {"modifiers": 0, "vk": 0x7A, "display": "F11"},
         ]
         emergency_candidates = [
             {"modifiers": 0, "vk": VK_F7, "display": "F7"},
-            {"modifiers": MOD_CONTROL | MOD_SHIFT, "vk": VK_F7, "display": "CTRL + SHIFT + F7"},
-            {"modifiers": MOD_CONTROL | MOD_SHIFT, "vk": 0x7B, "display": "CTRL + SHIFT + F12"},
+            {"modifiers": 0, "vk": 0x77, "display": "F8"},
+            {"modifiers": 0, "vk": 0x78, "display": "F9"},
         ]
         first_error = ""
         seen: set[tuple[int, int]] = set()
@@ -896,6 +970,7 @@ class AFKPilotApp:
                     emergency_candidate["modifiers"],
                     emergency_candidate["vk"],
                 ):
+                    self.hotkeys_ready = True
                     self.hotkey = toggle_candidate
                     self.emergency_hotkey = emergency_candidate
                     self.hotkey_button.configure(text=toggle_candidate["display"])
@@ -919,6 +994,7 @@ class AFKPilotApp:
                 if not first_error:
                     first_error = self.hotkeys.last_error
 
+        self.hotkeys_ready = False
         if self.test_mode:
             raise RuntimeError(f"Could not register the test hotkeys: {first_error}")
         self.root.after(
@@ -969,6 +1045,14 @@ class AFKPilotApp:
         return 1.0 / cps
 
     def start(self) -> None:
+        if self.capture_active:
+            return
+        if self.fatal_error:
+            messagebox.showerror(APP_NAME, "Restart AFK Pilot after the unexpected error.")
+            return
+        if not self.hotkeys_ready:
+            messagebox.showerror(APP_NAME, "Automation is disabled until both hotkeys are available. Close a conflicting app, then assign the toggle key again.")
+            return
         try:
             if not (self.walk_var.get() or self.click_var.get() or self.eat_var.get()):
                 raise ValueError("Enable auto-walk, auto-click, or auto-eat before starting.")
@@ -1015,7 +1099,7 @@ class AFKPilotApp:
         self._save_config()
 
     def _target_is_focused(self) -> bool:
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        hwnd = self.keys._user32.GetForegroundWindow()
         return self.target_hwnd is not None and int(hwnd or 0) == self.target_hwnd
 
     def _set_status(self, text: str, color: str, detail: str) -> None:
@@ -1027,15 +1111,20 @@ class AFKPilotApp:
         )
 
     def _tick(self) -> None:
+        pending: list[str] = []
         try:
             while True:
-                event = self.events.get_nowait()
-                if event == "toggle" and not self.capture_active:
-                    self.toggle()
-                elif event == "stop":
-                    self.stop()
+                pending.append(self.events.get_nowait())
         except queue.Empty:
             pass
+        if "hotkeys_failed" in pending:
+            self.stop()
+            self.hotkeys_ready = False
+            messagebox.showerror(APP_NAME, "Global hotkeys stopped working. Automation has stopped. Restart AFK Pilot.")
+        elif "stop" in pending:
+            self.stop()
+        elif not self.capture_active and pending.count("toggle") % 2:
+            self.toggle()
 
         now = time.monotonic()
         delta = max(0.0, now - self.last_tick)
@@ -1056,7 +1145,7 @@ class AFKPilotApp:
                 self.AMBER,
                 f"Automation starts in {wait:.1f} seconds. Press {self.emergency_hotkey['display']} to cancel.",
             )
-        elif self.target_hwnd is not None and not ctypes.windll.user32.IsWindow(
+        elif self.target_hwnd is not None and not self.keys._user32.IsWindow(
             self.target_hwnd
         ):
             if self.active:
@@ -1156,6 +1245,13 @@ class AFKPilotApp:
                     self.stop()
                     messagebox.showerror(APP_NAME, f"Windows rejected background input:\n{exc}")
 
+            if self.active:
+                try:
+                    self.keys.advance_sprint()
+                except (OSError, RuntimeError) as exc:
+                    self.stop()
+                    messagebox.showerror(APP_NAME, f"Windows rejected sprint input: {exc}")
+
             if self.input_target_hwnd is not None:
                 state_text = "TARGETED" if target_is_focused else "BACKGROUND"
                 target_detail = f"Sending only to {self.window_titles.get(self.target_var.get(), 'selected window')}"
@@ -1186,74 +1282,121 @@ class AFKPilotApp:
         if self.capture_active:
             return
         self.stop()
-        self.capture_active = True
         self.hotkeys.stop()
-        self.hotkey_button.configure(text="PRESS A KEY...")
-        self.root.bind_all("<KeyPress>", self._capture_hotkey)
-        self.root.focus_force()
+        self.hotkeys_ready = False
+        self._discard_hotkey_events()
+        self.capture_active = True
+        self.capture_candidate = None
+        dialog = tk.Toplevel(self.root)
+        self.capture_dialog = dialog
+        dialog.title("Assign toggle hotkey")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.configure(bg=self.CARD)
+        tk.Label(dialog, text="Press and release your new hotkey", bg=self.CARD, fg=self.TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(padx=24, pady=(22, 10))
+        self.capture_hint = tk.Label(dialog, text="A single key works. Ctrl, Alt, and Shift are optional.\nEsc cancels. W, Space, and F12 are unavailable.",
+                                     bg=self.CARD, fg=self.MUTED, wraplength=370)
+        self.capture_hint.pack(padx=24, pady=(0, 16))
+        ttk.Button(dialog, text="Cancel", command=lambda: self._finish_capture(self.hotkey)).pack(pady=(0, 20))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._finish_capture(self.hotkey))
+        # Capture before widget/class bindings can consume plain letters or Space.
+        dialog.bindtags((str(dialog),))
+        dialog.bind("<KeyPress>", self._capture_hotkey)
+        dialog.bind("<KeyRelease>", self._capture_release)
+        dialog.bind("<FocusOut>", lambda _event: self.root.after(100, self._capture_focus_lost))
+        dialog.grab_set()
+        dialog.focus_force()
+
+    def _capture_focus_lost(self) -> None:
+        if self.capture_dialog is None:
+            return
+        focused = self.root.focus_get()
+        if focused is None or focused.winfo_toplevel() != self.capture_dialog:
+            self._finish_capture(self.hotkey)
 
     def _capture_hotkey(self, event: tk.Event) -> str:
         if event.keysym == "Escape":
             self._finish_capture(self.hotkey)
             return "break"
-
-        candidate = hotkey_from_event(event)
-        if candidate is None:
+        if self.capture_candidate is not None:
             return "break"
-        if candidate["vk"] in {VK_W, VK_SPACE, VK_LCONTROL}:
-            messagebox.showwarning(APP_NAME, "Choose a hotkey that is not W, Space, or Left Ctrl.")
+        try:
+            candidate = hotkey_from_event(event)
+            if candidate is None:
+                return "break"
+            if (candidate["vk"], candidate["modifiers"]) == (self.emergency_hotkey["vk"], self.emergency_hotkey["modifiers"]):
+                raise ValueError(f"{self.emergency_hotkey['display']} is reserved for emergency stop.")
+        except ValueError as exc:
+            self.capture_hint.configure(text=str(exc), fg=self.AMBER)
             return "break"
-        if (
-            candidate["vk"] == self.emergency_hotkey["vk"]
-            and candidate["modifiers"] == self.emergency_hotkey["modifiers"]
-        ):
-            messagebox.showwarning(
-                APP_NAME,
-                f"{self.emergency_hotkey['display']} is reserved for the emergency stop.",
-            )
-            return "break"
-
-        old_hotkey = self.hotkey
-        self.root.unbind_all("<KeyPress>")
-        if self.hotkeys.start(
-            candidate["modifiers"],
-            candidate["vk"],
-            self.emergency_hotkey["modifiers"],
-            self.emergency_hotkey["vk"],
-        ):
-            self.hotkey = candidate
-            self.capture_active = False
-            self.hotkey_button.configure(text=candidate["display"])
-            self._save_config()
-        else:
-            messagebox.showwarning(APP_NAME, f"{candidate['display']} is already used by another app.")
-            self.hotkey = old_hotkey
-            self.capture_active = False
-            self.hotkey_button.configure(text=old_hotkey["display"])
-            self.hotkeys.start(
-                old_hotkey["modifiers"],
-                old_hotkey["vk"],
-                self.emergency_hotkey["modifiers"],
-                self.emergency_hotkey["vk"],
-            )
+        self.capture_candidate = candidate
+        self.capture_hint.configure(text=f"Release {candidate['display']} to save.", fg=self.GREEN)
         return "break"
 
+    def _capture_release(self, event: tk.Event) -> str:
+        candidate = self.capture_candidate
+        if candidate is not None and int(event.keycode) == candidate["vk"]:
+            self._finish_capture(candidate)
+        return "break"
+
+    def _discard_hotkey_events(self) -> None:
+        try:
+            while True:
+                self.events.get_nowait()
+        except queue.Empty:
+            pass
+
     def _finish_capture(self, hotkey: dict[str, Any]) -> None:
-        self.root.unbind_all("<KeyPress>")
+        old_hotkey = self.hotkey
+        dialog = self.capture_dialog
+        self.capture_dialog = None
+        self.capture_candidate = None
+        if dialog is not None:
+            dialog.grab_release()
+            dialog.destroy()
+        self._discard_hotkey_events()
+        self.hotkeys_ready = self.hotkeys.start(hotkey["modifiers"], hotkey["vk"],
+                                               self.emergency_hotkey["modifiers"], self.emergency_hotkey["vk"])
+        if self.hotkeys_ready:
+            self.hotkey = hotkey
+        else:
+            failure = self.hotkeys.last_error
+            self.hotkeys_ready = self.hotkeys.start(old_hotkey["modifiers"], old_hotkey["vk"],
+                                                   self.emergency_hotkey["modifiers"], self.emergency_hotkey["vk"])
+            restoration = f"Kept {old_hotkey['display']}." if self.hotkeys_ready else "Automation is disabled. Restart AFK Pilot after closing the conflicting app."
+            messagebox.showwarning(APP_NAME, f"Could not assign {hotkey['display']}. {failure}\n\n{restoration}")
         self.capture_active = False
-        self.hotkey_button.configure(text=hotkey["display"])
-        self.hotkeys.start(
-            hotkey["modifiers"],
-            hotkey["vk"],
-            self.emergency_hotkey["modifiers"],
-            self.emergency_hotkey["vk"],
-        )
+        self.hotkey_button.configure(text=self.hotkey["display"])
+        self._save_config()
+
+    def _callback_failed(self, exc_type: type, exc: BaseException, traceback: Any) -> None:
+        self.stop()
+        self.fatal_error = True
+        LOGGER.error("UI callback failed", exc_info=(exc_type, exc, traceback))
+        # Fail closed; an exception in the timer loop must never leave inputs held.
+        self.hotkeys_ready = False
+        self._set_status("ERROR", self.RED, "Automation stopped. Restart AFK Pilot.")
+        if self.test_mode:
+            self.test_failure = exc
+            self.close()
+            return
+        messagebox.showerror(APP_NAME, f"Automation stopped after an unexpected error.\n{exc}\n\nDiagnostics: {self.config_path.parent / 'afkpilot.log'}")
 
     def close(self) -> None:
-        self.stop()
-        self.hotkeys.stop()
-        self._save_config()
-        self.root.destroy()
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.stop()
+            self.hotkeys.stop()
+            self._save_config()
+        finally:
+            atexit.unregister(self.keys.release_all)
+            if self.log_handler is not None:
+                LOGGER.removeHandler(self.log_handler)
+                self.log_handler.close()
+            self.root.destroy()
 
 
 def self_test() -> None:
@@ -1294,9 +1437,14 @@ def self_test() -> None:
     fake = FakeUser32()
     controller = KeyController()
     controller._user32 = fake
-    sleep_calls: list[float] = []
-    controller._sleep = sleep_calls.append
+    now = [0.0]
+    controller._clock = lambda: now[0]
     controller.apply_movement(True, True, False, 123)
+    assert controller._held == [VK_W]
+    now[0] += SPRINT_WARMUP_SECONDS
+    controller.advance_sprint()
+    now[0] += SPRINT_HOLD_SECONDS
+    controller.advance_sprint()
     key_messages = [(message, vk) for _hwnd, message, vk, _lp in fake.messages]
     assert key_messages[:3] == [
         (WM_KEYDOWN, VK_W),
@@ -1304,17 +1452,18 @@ def self_test() -> None:
         (WM_KEYUP, VK_LCONTROL),
     ]
     assert controller._held == [VK_W]
-    assert sleep_calls == [SPRINT_WARMUP_SECONDS, SPRINT_HOLD_SECONDS]
     before_reassert = len(fake.messages)
-    sleep_calls.clear()
     controller.reassert_background(True, 123)
+    now[0] += SPRINT_WARMUP_SECONDS
+    controller.advance_sprint()
+    now[0] += SPRINT_HOLD_SECONDS
+    controller.advance_sprint()
     reassert_messages = fake.messages[before_reassert:]
     assert [(message, vk) for _hwnd, message, vk, _lp in reassert_messages] == [
         (WM_KEYDOWN, VK_W),
         (WM_KEYDOWN, VK_LCONTROL),
         (WM_KEYUP, VK_LCONTROL),
     ]
-    assert sleep_calls == [SPRINT_WARMUP_SECONDS, SPRINT_HOLD_SECONDS]
     controller.hold_mouse("right", 123)
     controller.click("left", 123)
     controller.release_all()
@@ -1324,21 +1473,62 @@ def self_test() -> None:
     assert any(message == WM_RBUTTONUP for _hwnd, message, _wp, _lp in fake.messages)
 
 
+class SingleInstance:
+    """Prevent two copies competing for the same global hotkeys/settings."""
+
+    def __init__(self, name: str = "Local\\AFKPilot") -> None:
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        self.kernel32.CreateMutexW.restype = wintypes.HANDLE
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+        self.handle = self.kernel32.CreateMutexW(None, False, name)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.already_running = ctypes.get_last_error() == 183
+
+    def close(self) -> None:
+        if self.handle:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
 def main() -> None:
+    if "--version" in sys.argv:
+        print(APP_VERSION)
+        return
     if "--self-test" in sys.argv:
         self_test()
         return
     if os.name != "nt":
         raise SystemExit("AFK Pilot requires Windows 10 or 11.")
-    root = tk.Tk()
     gui_self_test = "--gui-self-test" in sys.argv
-    if gui_self_test:
-        os.environ["AFKPILOT_CONFIG_DIR"] = str(Path.cwd() / "work" / "gui-self-test")
+    with tempfile.TemporaryDirectory(prefix="afkpilot-smoke-") as test_directory:
+        if gui_self_test:
+            os.environ["AFKPILOT_CONFIG_DIR"] = test_directory
+        instance = None if gui_self_test else SingleInstance()
+        root = tk.Tk()
         root.withdraw()
-    app = AFKPilotApp(root, test_mode=gui_self_test)
-    if gui_self_test:
-        root.after(500, app.close)
-    root.mainloop()
+        app = None
+        try:
+            if instance is not None and instance.already_running:
+                messagebox.showinfo(APP_NAME, "AFK Pilot is already running. Use or close the existing window before opening another copy.", parent=root)
+                return
+            app = AFKPilotApp(root, test_mode=gui_self_test)
+            if gui_self_test:
+                root.after(500, app.close)
+            else:
+                root.deiconify()
+            root.mainloop()
+            if app.test_failure is not None:
+                raise app.test_failure
+        finally:
+            if app is not None and not app.closed:
+                app.close()
+            elif app is None:
+                root.destroy()
+            if instance is not None:
+                instance.close()
 
 
 if __name__ == "__main__":

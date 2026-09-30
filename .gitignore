@@ -6,3 +6,9 @@ build/
 dist/
 *.spec
 settings.json
+.venv/
+work/
+backups/
+*.log
+*.pfx
+*.p12
