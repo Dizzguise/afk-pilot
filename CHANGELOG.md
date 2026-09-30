@@ -2,6 +2,10 @@
 
 ## 2.1.1
 
+- Release as a free MIT-licensed tool with GitHub build attestations and clear
+  download verification instructions.
+- Size the initial window to its controls so labels and delay units are visible.
+
 - Fix Num Lock being interpreted as Alt when assigning a hotkey on Windows.
 - Capture plain keys and Ctrl/Alt/Shift combinations in a focused dialog; save on
   key release. Escape, Cancel, and leaving the dialog preserve the previous key.

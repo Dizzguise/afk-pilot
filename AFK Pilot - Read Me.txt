@@ -3,6 +3,14 @@ AFK PILOT 2.1.1
 
 Window Automation Utility
 
+Free and open source under the MIT License (see LICENSE). Built mainly for
+Minecraft-style AFK tasks and other applications that accept Windows input.
+No accounts, ads, subscriptions, or telemetry. Downloads and support:
+https://github.com/Dizzguise/afk-pilot
+
+This executable is unsigned. Obtain releases from the official repository and
+verify their checksums/build attestations as described in PUBLISHING.md.
+
 WHAT IT DOES
 - Auto-walk: holds W.
 - Sprint: starts holding W, waits 0.20 seconds, holds Left Ctrl for 0.15

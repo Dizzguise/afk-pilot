@@ -14,6 +14,5 @@ includes notices for components of its standard library.
 PyInstaller's bootloader distribution exception is included in its license file.
 Build-only dependencies are pinned in `requirements-build.txt`.
 
-No license for AFK Pilot's original source code has been selected in this
-repository. Public source visibility alone does not grant an open-source license.
-The repository owner should choose distribution terms before a broader launch.
+AFK Pilot's original source code is licensed under the MIT License in `LICENSE`.
+Third-party components retain their own licenses and notices listed above.

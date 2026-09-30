@@ -1,25 +1,48 @@
 # AFK Pilot
 
-AFK Pilot is a lightweight Windows utility for sending configurable walking,
-sprint, jump, eating, and clicking input to a selected application window.
+AFK Pilot is a free, open-source AFK button for Windows, built mainly for
+Minecraft-style tasks. Toggle walking, sprint, jump, eating, or clicking with one
+hotkey. It also works with other games and applications that accept the same
+Windows input methods.
 
 It was built for Minecraft-style AFK tasks, but window targeting is generic and
 can be used with other Windows applications that accept standard window messages.
 
-## Release candidate 2.1.1
+## Download
 
 2.1.1 fixes hotkey assignment with Num Lock enabled and adds Windows regression
 coverage, safer input cleanup, and verified release packaging.
 
+- [Download the latest release](https://github.com/Dizzguise/afk-pilot/releases/latest)
 - [Windows builds and test results](https://github.com/Dizzguise/afk-pilot/actions/workflows/windows.yml)
 - [Publishing, signing, updates, and rollback](PUBLISHING.md)
 - [Changes](CHANGELOG.md)
 - [GitHub Releases](https://github.com/Dizzguise/afk-pilot/releases)
 
-Download the artifact for the desired successful commit, extract the inner ZIP,
-and run `AFKPilot.exe`. Python is not required. CI builds are unsigned; releases
-remain drafts until reviewed. The legacy [2.1.0 package](release/AFK%20Pilot%202.1.0.zip)
-is retained only for rollback.
+Download the Windows x64 ZIP from the release page, extract it, and run
+`AFKPilot.exe`. Python is not required. Downloads are free, with no account,
+subscription, ads, or telemetry. The executable is currently unsigned, so Windows
+may show an unknown-publisher or SmartScreen prompt. Download only from this
+repository's releases; checksums and GitHub build attestations let you verify the
+package's origin. The legacy [2.1.0 package](release/AFK%20Pilot%202.1.0.zip) is
+retained for rollback.
+
+## License and trust
+
+AFK Pilot is [MIT licensed](LICENSE): use, modify, and share it freely while
+preserving the license notice. The project is offered free of charge, with no
+profit or monetization requirement. MIT also permits commercial reuse by others.
+
+The runtime uses Python's standard library, Windows input APIs, and local
+settings. It makes no network requests and has no automatic update service.
+Release packages are built and tested by the public GitHub Actions workflow,
+include their source commit and checksums, and carry a verifiable build
+attestation. See [verification instructions](PUBLISHING.md#verify-a-download).
+Attestations prove build provenance; they are separate from a Windows publisher
+signature and do not guarantee compatibility with every game.
+
+Report bugs and suggest improvements in
+[GitHub Issues](https://github.com/Dizzguise/afk-pilot/issues).
 
 ## Features
 
@@ -44,6 +67,11 @@ message, but it cannot guarantee that the target application consumed it.
 Test automation somewhere safe before leaving it unattended. Keep the emergency
 stop hotkey available, and do not use the tool where automation violates the
 application or server rules.
+
+For Minecraft, try foreground mode first if background mode is ignored. This is
+a desktop input tool, not a mod or an anti-cheat bypass; behavior depends on the
+game edition, version, input settings, and server rules. Other uses include
+repetitive input in local test applications that accept standard Windows input.
 
 ## Run from source
 

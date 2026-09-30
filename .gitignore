@@ -12,3 +12,4 @@ backups/
 *.log
 *.pfx
 *.p12
+/AFKPilot.exe

@@ -204,6 +204,32 @@ class GuiSafetyTests(unittest.TestCase):
         self.assertEqual(saved["hotkey"], self.app.hotkey)
         self.assertFalse(self.app.requested)
 
+    def test_native_tk_bindings_capture_plain_and_modified_keys(self):
+        self.root.deiconify()
+        self.root.update()
+        for state, expected in ((0x8, "K"), (0xA, "K"), (0x4, "CTRL + K"), (0x20010, "ALT + K")):
+            with self.subTest(state=state):
+                self.app.begin_hotkey_capture()
+                self.root.update()
+                dialog = self.app.capture_dialog
+                dialog.event_generate("<KeyPress>", keycode=0x4B, state=state)
+                self.root.update()
+                self.assertEqual(self.app.capture_candidate["display"], expected)
+                dialog.event_generate("<KeyRelease>", keycode=0x4B, state=state)
+                self.root.update()
+                self.assertEqual(self.app.hotkey["display"], expected)
+                self.assertFalse(self.app.capture_active)
+
+    def test_initial_layout_does_not_clip_control_labels(self):
+        self.root.deiconify()
+        self.root.update()
+        def check(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() in {"Label", "TButton", "TCheckbutton", "Entry"} and child.winfo_manager():
+                    self.assertGreaterEqual(child.winfo_width(), child.winfo_reqwidth(), str(child))
+                check(child)
+        check(self.root)
+
     def test_escape_keeps_old_key_and_discards_queued_toggle(self):
         old = self.app.hotkey.copy()
         self.app.events.put("toggle")

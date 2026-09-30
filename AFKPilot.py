@@ -575,6 +575,8 @@ class AFKPilotApp:
         self.capture_active = False
         self.capture_dialog: tk.Toplevel | None = None
         self.capture_candidate: dict[str, Any] | None = None
+        self._capture_focus_after: str | None = None
+        self._tick_after: str | None = None
         self.hotkeys_ready = False
         self.closed = False
         self.test_failure: BaseException | None = None
@@ -596,6 +598,11 @@ class AFKPilotApp:
 
         self._build_style()
         self._build_ui()
+        self.root.update_idletasks()
+        width = max(540, self.root.winfo_reqwidth())
+        height = max(760, self.root.winfo_reqheight())
+        self.root.minsize(width, height)
+        self.root.geometry(f"{width}x{height}")
         self._load_vars()
         self.refresh_windows()
         self._register_hotkey_or_warn()
@@ -603,7 +610,7 @@ class AFKPilotApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.report_callback_exception = self._callback_failed
         atexit.register(self.keys.release_all)
-        self.root.after(50, self._tick)
+        self._tick_after = self.root.after(50, self._tick)
 
     def _config_path(self) -> Path:
         override = (
@@ -1111,6 +1118,11 @@ class AFKPilotApp:
         )
 
     def _tick(self) -> None:
+        if self.closed:
+            return
+        if self._tick_after is not None:
+            self.root.after_cancel(self._tick_after)
+            self._tick_after = None
         pending: list[str] = []
         try:
             while True:
@@ -1276,7 +1288,8 @@ class AFKPilotApp:
                     f"{target_detail}. Press {self.emergency_hotkey['display']} for an immediate stop.",
                 )
 
-        self.root.after(10, self._tick)
+        if not self.closed:
+            self._tick_after = self.root.after(10, self._tick)
 
     def begin_hotkey_capture(self) -> None:
         if self.capture_active:
@@ -1304,11 +1317,17 @@ class AFKPilotApp:
         dialog.bindtags((str(dialog),))
         dialog.bind("<KeyPress>", self._capture_hotkey)
         dialog.bind("<KeyRelease>", self._capture_release)
-        dialog.bind("<FocusOut>", lambda _event: self.root.after(100, self._capture_focus_lost))
+        dialog.bind("<FocusOut>", self._schedule_capture_focus_check)
         dialog.grab_set()
         dialog.focus_force()
 
+    def _schedule_capture_focus_check(self, _event: tk.Event) -> None:
+        if self._capture_focus_after is not None:
+            self.root.after_cancel(self._capture_focus_after)
+        self._capture_focus_after = self.root.after(100, self._capture_focus_lost)
+
     def _capture_focus_lost(self) -> None:
+        self._capture_focus_after = None
         if self.capture_dialog is None:
             return
         focused = self.root.focus_get()
@@ -1387,6 +1406,10 @@ class AFKPilotApp:
         if self.closed:
             return
         self.closed = True
+        for callback in (self._tick_after, self._capture_focus_after):
+            if callback is not None:
+                self.root.after_cancel(callback)
+        self._tick_after = self._capture_focus_after = None
         try:
             self.stop()
             self.hotkeys.stop()

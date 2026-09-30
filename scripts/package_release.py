@@ -21,7 +21,7 @@ def digest(data):
 def package():
     binary = ROOT / 'dist/AFKPilot.exe'
     files = {name: (ROOT / name).read_bytes() for name in (
-        'AFK Pilot - Read Me.txt', 'CHANGELOG.md', 'PUBLISHING.md', 'THIRD_PARTY_NOTICES.md')}
+        'AFK Pilot - Read Me.txt', 'LICENSE', 'CHANGELOG.md', 'PUBLISHING.md', 'THIRD_PARTY_NOTICES.md')}
     files['AFKPilot.exe'] = binary.read_bytes()
     files['licenses/Python.txt'] = (Path(sys.base_prefix) / 'LICENSE.txt').read_bytes()
     tcl_root = Path(tkinter.Tcl().eval('info library')).parent

@@ -13,6 +13,10 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -34,6 +38,11 @@ jobs:
       - name: Test, build, smoke test, and package
         shell: pwsh
         run: ./build.ps1
+      - name: Attest portable packages
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/AFK-Pilot-*-windows-x64.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: AFK-Pilot-windows-x64

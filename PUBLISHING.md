@@ -2,8 +2,8 @@
 
 ## Release state
 
-2.1.1 is the release candidate for the hotkey fix. CI builds an **unsigned Windows
-x64 portable ZIP**. A green build verifies tests, source GUI startup, packaged
+2.1.1 is the hotkey-fix release. CI builds an **unsigned Windows x64 portable
+ZIP** with MIT licensing, checksums, and a GitHub build attestation. A green build verifies tests, source GUI startup, packaged
 startup, and package integrity. It does not certify compatibility with every game
 or replace interactive testing on a clean Windows machine.
 
@@ -60,9 +60,26 @@ The stock GitHub workflow intentionally has no signing credentials. A valid
 signature identifies the publisher; it is not a promise that SmartScreen will
 never prompt. See Microsoft's [SignTool reference](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool).
 
-Choose AFK Pilot's distribution license/terms and a support channel before a broad
-launch. Third-party runtime license texts are already bundled. For initial private
-testing, the unsigned ZIP can be shared with testers who understand its provenance.
+AFK Pilot is MIT licensed and distributed for free. Support is through
+[GitHub Issues](https://github.com/Dizzguise/afk-pilot/issues). The MIT license and
+third-party runtime notices are included in every package. The free release path
+does not require buying a signing certificate: publish the transparently unsigned
+GitHub-built ZIP with its checksum and build attestation. Do not describe that
+attestation as a Windows Authenticode signature.
+
+## Verify a download
+
+Download the ZIP and `.zip.sha256` from this repository's GitHub Release. Compare:
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\AFK-Pilot-2.1.1-windows-x64.zip
+gh attestation verify .\AFK-Pilot-2.1.1-windows-x64.zip --repo Dizzguise/afk-pilot
+```
+
+The attestation connects the exact package to the public build workflow and source
+commit. After extraction, `BUILD-INFO.json` records the source revision and binary
+hash; `SHA256SUMS.txt` covers the packaged files. GitHub documents
+[artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations).
 
 ## Create a draft, then publish
 
@@ -76,9 +93,11 @@ git push origin v2.1.1
 ```
 
 The tag workflow verifies the version, rebuilds/tests, and creates a **draft**
-GitHub Release with the ZIP and checksum. Review notes and asset hashes. If using
+GitHub Release with the ZIP and checksum. The build also attests the ZIP on GitHub.
+Review notes and asset hashes. If using
 signing, replace both unsigned assets with the verified signed ZIP and its checksum
-before publication. Publish from GitHub's release page, or explicitly run:
+before publication, and issue a new attestation for the replaced package through
+your signing workflow. Publish from GitHub's release page, or explicitly run:
 
 ```powershell
 gh release edit v2.1.1 --draft=false --repo Dizzguise/afk-pilot
