@@ -2,7 +2,7 @@
 
 ## Release state
 
-2.1.1 is the hotkey-fix release. CI builds an **unsigned Windows x64 portable
+2.1.2 is the repeated-hotkey-capture fix release. CI builds an **unsigned Windows x64 portable
 ZIP** with MIT licensing, checksums, and a GitHub build attestation. A green build verifies tests, source GUI startup, packaged
 startup, and package integrity. It does not certify compatibility with every game
 or replace interactive testing on a clean Windows machine.
@@ -22,7 +22,7 @@ py -3.12 -m venv .venv
 .\build.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-Outputs: `dist/AFKPilot.exe`, `dist/AFK-Pilot-2.1.1-windows-x64.zip`, and its
+Outputs: `dist/AFKPilot.exe`, `dist/AFK-Pilot-2.1.2-windows-x64.zip`, and its
 `.zip.sha256` checksum. Each ZIP includes file hashes and `BUILD-INFO.json` with
 the source commit, dirty-worktree flag, source hash, binary hash, and tool versions.
 Publish only from a clean, committed checkout. Rebuild after changing any source.
@@ -72,8 +72,8 @@ attestation as a Windows Authenticode signature.
 Download the ZIP and `.zip.sha256` from this repository's GitHub Release. Compare:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\AFK-Pilot-2.1.1-windows-x64.zip
-gh attestation verify .\AFK-Pilot-2.1.1-windows-x64.zip --repo Dizzguise/afk-pilot
+Get-FileHash -Algorithm SHA256 .\AFK-Pilot-2.1.2-windows-x64.zip
+gh attestation verify .\AFK-Pilot-2.1.2-windows-x64.zip --repo Dizzguise/afk-pilot
 ```
 
 The attestation connects the exact package to the public build workflow and source
@@ -88,8 +88,8 @@ After the exact main commit passes the workflow and manual checks:
 ```powershell
 git status --short
 git pull --ff-only origin main
-git tag -a v2.1.1 -m 'AFK Pilot 2.1.1'
-git push origin v2.1.1
+git tag -a v2.1.2 -m 'AFK Pilot 2.1.2'
+git push origin v2.1.2
 ```
 
 The tag workflow verifies the version, rebuilds/tests, and creates a **draft**
@@ -100,7 +100,7 @@ before publication, and issue a new attestation for the replaced package through
 your signing workflow. Publish from GitHub's release page, or explicitly run:
 
 ```powershell
-gh release edit v2.1.1 --draft=false --repo Dizzguise/afk-pilot
+gh release edit v2.1.2 --draft=false --repo Dizzguise/afk-pilot
 ```
 
 Use GitHub Releases for binaries; leave the old `release/2.1.0` package as history.

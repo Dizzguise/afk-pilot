@@ -10,8 +10,8 @@ can be used with other Windows applications that accept standard window messages
 
 ## Download
 
-2.1.1 fixes hotkey assignment with Num Lock enabled and adds Windows regression
-coverage, safer input cleanup, and verified release packaging.
+2.1.2 fixes an unintended Alt modifier when assigning a shortcut again. It keeps
+intentional Alt combinations. The previous 2.1.1 release fixed Num Lock capture.
 
 - [Download the latest release](https://github.com/Dizzguise/afk-pilot/releases/latest)
 - [Windows builds and test results](https://github.com/Dizzguise/afk-pilot/actions/workflows/windows.yml)

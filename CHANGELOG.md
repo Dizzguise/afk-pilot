@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.2
+
+- Check Windows' Alt key state when capturing a shortcut so a stale Tk Alt flag
+  cannot turn a reassigned plain key into an Alt combination.
+- Keep intentional Alt combinations and add repeated-capture regression coverage.
+
 ## 2.1.1
 
 - Release as a free MIT-licensed tool with GitHub build attestations and clear

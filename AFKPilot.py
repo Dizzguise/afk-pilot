@@ -21,7 +21,7 @@ from typing import Any
 
 
 APP_NAME = "AFK Pilot"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 LOGGER = logging.getLogger("afkpilot")
 
 # Give the target time to observe W before sending a distinct sprint-key pulse.
@@ -32,6 +32,7 @@ BACKGROUND_REASSERT_DELAY_SECONDS = 0.75
 VK_W = 0x57
 VK_SPACE = 0x20
 VK_LCONTROL = 0xA2
+VK_MENU = 0x12
 VK_F7 = 0x76
 
 MOD_ALT = 0x0001
@@ -482,9 +483,19 @@ def make_hotkey(modifiers: int, vk: int) -> dict[str, Any]:
     return {"modifiers": modifiers, "vk": vk, "display": " + ".join([*names, KEY_NAMES[vk]])}
 
 
-def hotkey_from_event(event: tk.Event) -> dict[str, Any] | None:
+def alt_down_for_capture() -> bool:
+    """Read Alt from the Windows keyboard-message state during a Tk key event."""
+    get_key_state = ctypes.windll.user32.GetKeyState
+    get_key_state.argtypes = [ctypes.c_int]
+    get_key_state.restype = ctypes.c_short
+    return bool(get_key_state(VK_MENU) & 0x8000)
+
+
+def hotkey_from_event(event: tk.Event, *, alt_down: bool | None = None) -> dict[str, Any] | None:
     # Tk on Windows uses Mod1 (0x8) for NUM LOCK, not Alt. Alt uses
     # Mod2 (0x10), and native events can additionally carry AltMask (0x20000).
+    # The capture dialog supplies Windows' key state because Tk can retain an
+    # Alt flag after the key is released, especially across dialog reopenings.
     # Keycodes preserve the physical digit when Shift changes its keysym to ! etc.
     vk = int(getattr(event, "keycode", 0))
     if vk not in KEY_NAMES:
@@ -496,9 +507,13 @@ def hotkey_from_event(event: tk.Event) -> dict[str, Any] | None:
     if not vk:
         return None
     modifiers = 0
-    for mask, modifier in ((0x4, MOD_CONTROL), (0x20010, MOD_ALT), (0x1, MOD_SHIFT)):
+    for mask, modifier in ((0x4, MOD_CONTROL), (0x1, MOD_SHIFT)):
         if event.state & mask:
             modifiers |= modifier
+    if alt_down is None:
+        alt_down = bool(event.state & 0x20010)
+    if alt_down:
+        modifiers |= MOD_ALT
     return make_hotkey(modifiers, vk)
 
 
@@ -1341,7 +1356,7 @@ class AFKPilotApp:
         if self.capture_candidate is not None:
             return "break"
         try:
-            candidate = hotkey_from_event(event)
+            candidate = hotkey_from_event(event, alt_down=alt_down_for_capture())
             if candidate is None:
                 return "break"
             if (candidate["vk"], candidate["modifiers"]) == (self.emergency_hotkey["vk"], self.emergency_hotkey["modifiers"]):

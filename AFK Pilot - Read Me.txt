@@ -1,4 +1,4 @@
-AFK PILOT 2.1.1
+AFK PILOT 2.1.2
 ===============
 
 Window Automation Utility

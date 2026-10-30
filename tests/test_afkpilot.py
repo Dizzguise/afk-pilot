@@ -32,6 +32,12 @@ class HotkeyParsingTests(unittest.TestCase):
             self.assertEqual(pilot.hotkey_from_event(key("F8", 0x77, state))["display"], "ALT + F8")
         self.assertEqual(pilot.hotkey_from_event(key("K", 0x4B, 0x2001D))["display"], "CTRL + ALT + SHIFT + K")
 
+    def test_native_alt_state_overrides_stale_tk_flag(self):
+        stale = key("K", 0x4B, 0x20010)
+        self.assertEqual(pilot.hotkey_from_event(stale, alt_down=False)["display"], "K")
+        self.assertEqual(pilot.hotkey_from_event(stale, alt_down=True)["display"], "ALT + K")
+        self.assertEqual(pilot.hotkey_from_event(key("K", 0x4B, 0), alt_down=True)["display"], "ALT + K")
+
     def test_shifted_digit_keeps_physical_key(self):
         self.assertEqual(pilot.hotkey_from_event(key("exclam", 0x31, 1))["display"], "SHIFT + 1")
 
@@ -212,13 +218,42 @@ class GuiSafetyTests(unittest.TestCase):
                 self.app.begin_hotkey_capture()
                 self.root.update()
                 dialog = self.app.capture_dialog
-                dialog.event_generate("<KeyPress>", keycode=0x4B, state=state)
+                with patch.object(pilot, "alt_down_for_capture", return_value=bool(state & 0x20010)):
+                    dialog.event_generate("<KeyPress>", keycode=0x4B, state=state)
+                    self.root.update()
                 self.root.update()
                 self.assertEqual(self.app.capture_candidate["display"], expected)
                 dialog.event_generate("<KeyRelease>", keycode=0x4B, state=state)
                 self.root.update()
                 self.assertEqual(self.app.hotkey["display"], expected)
                 self.assertFalse(self.app.capture_active)
+
+    def test_reassign_after_stale_alt_and_cancel_after_focus_loss(self):
+        self.begin()
+        with patch.object(pilot, "alt_down_for_capture", return_value=False):
+            self.app._capture_hotkey(key("K", 0x4B))
+        self.app._capture_release(key("K", 0x4B))
+        self.assertEqual(self.app.hotkey["display"], "K")
+
+        self.begin()
+        with patch.object(pilot, "alt_down_for_capture", return_value=False):
+            self.app._capture_hotkey(key("F8", 0x77, 0x20010))
+        self.app._capture_release(key("F8", 0x77, 0x20010))
+        self.assertEqual(self.app.hotkey["display"], "F8")
+
+        self.begin()
+        with patch.object(pilot, "alt_down_for_capture", return_value=True):
+            self.app._capture_hotkey(key("F9", 0x78, 0x10))
+        self.app._capture_release(key("F9", 0x78, 0x10))
+        self.assertEqual(self.app.hotkey["display"], "ALT + F9")
+
+        self.begin()
+        with patch.object(self.root, "focus_get", return_value=None):
+            self.app._capture_focus_lost()
+        self.assertEqual(self.app.hotkey["display"], "ALT + F9")
+        self.begin()
+        self.app._capture_hotkey(key("Escape", 0x1B))
+        self.assertEqual(self.app.hotkey["display"], "ALT + F9")
 
     def test_initial_layout_does_not_clip_control_labels(self):
         self.root.deiconify()
